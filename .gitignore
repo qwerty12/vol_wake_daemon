@@ -1,0 +1,3 @@
+/extra_ndk/lib64/*.so
+.vscode/
+/vol_wake_daemon
