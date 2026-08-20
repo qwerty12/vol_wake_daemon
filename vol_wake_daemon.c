@@ -180,10 +180,8 @@ static void apply_low_priority(void)
 static int is_screen_on(void)
 {
     const int interactive = IsInteractive();
-    if (__predict_true(interactive != -1)) {
-        log_verbose("PowerManager.isInteractive() -> %d", interactive);
+    if (__predict_true(interactive != -1))
         return interactive;
-    }
 
     log_verbose("IsInteractive() unavailable; assuming screen may be off");
     return 0;
@@ -235,12 +233,19 @@ static void daemonise()
         }
     }
 
+    for (int i = 1; i < _NSIG; ++i)
+        signal(i, SIG_DFL);
+    sigset_t empty_set;
+    sigemptyset(&empty_set);
+    sigprocmask(SIG_SETMASK, &empty_set, NULL);
+
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); exit(EXIT_FAILURE); }
     if (pid > 0) _exit(EXIT_SUCCESS);
 
     if (setsid() < 0) { perror("setsid"); exit(EXIT_FAILURE); }
     signal(SIGHUP, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);
 
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
@@ -253,28 +258,29 @@ static void daemonise()
     umask(0);
 
     const int devnull = open("/dev/null", O_RDWR);
-    if (devnull >= 0) {
-        dup2(devnull, STDIN_FILENO);
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
-        if (devnull > STDERR_FILENO) close(devnull);
-    }
+    if (devnull < 0) exit(EXIT_FAILURE);
+    dup2(devnull, STDIN_FILENO);
+    dup2(devnull, STDOUT_FILENO);
+    dup2(devnull, STDERR_FILENO);
+    if (devnull > STDERR_FILENO) close(devnull);
 
-    chdir("/");
+    if (chdir("/") < 0) exit(EXIT_FAILURE);
 }
 
-static void usage(const char *argv0) {
+static void usage(const char *argv0)
+{
     fprintf(stderr,
         "usage: %s [-f] [-v] [--vol-name NAME]\n"
         "  -f              stay in foreground, log to stderr (default: daemonise)\n"
         "  -v              verbose logging\n"
         "  --vol-name      evdev name (not path) for the volume keys (default: auto-detect by\n"
-        "                  EVIOCGBIT capability -- the KEY_VOLUMEUP-supporting\n"
-        "                  device with the fewest total supported keys)\n",
+        "                  finding the KEY_VOLUMEUP-supporting device\n"
+        "                  with the fewest keys)\n",
         argv0);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     char *vol_name = NULL;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
