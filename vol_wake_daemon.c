@@ -12,8 +12,11 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <asm/bitsperlong.h>
+
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -54,15 +57,13 @@ static void on_signal(__unused const int sig)
     g_running = 0;
 }
 
-#define KEYBITS_WORDS ((KEY_MAX / (8 * sizeof(unsigned long))) + 1)
+#define KEYBITS_WORDS howmany(KEY_MAX + 1, __BITS_PER_LONG)
 
 static int count_bits_set(const unsigned long *bits, const size_t nwords)
 {
     int count = 0;
-    for (size_t i = 0; i < nwords; ++i) {
-        unsigned long w = bits[i];
-        while (w) { count += (int)(w & 1); w >>= 1; }
-    }
+    for (size_t i = 0; i < nwords; ++i)
+        count += __builtin_popcountl(bits[i]);
     return count;
 }
 
@@ -75,13 +76,15 @@ static int open_volume_key_device(const char *vol_name)
     struct dirent *de;
 
     char name[80];
-    name[sizeof(name) - 1] = '\0';
+    int best_fd = -1, best_count = -1;
     unsigned long keybits[KEYBITS_WORDS];
-    int best_count = -1, best_fd = -1;
     char best_path[sizeof(g_vol_dev)];
 
     if (!(dir = opendir(device_path)))
         return -1;
+
+    if (vol_name)
+        name[sizeof(name) - 1] = '\0';
 
     strlcpy(g_vol_dev, device_path, sizeof(g_vol_dev));
     filename = g_vol_dev + strlen(device_path);
@@ -111,8 +114,8 @@ static int open_volume_key_device(const char *vol_name)
         } else {
             memset(keybits, 0, sizeof(keybits));
             if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0) {
-                const int has_volup = (keybits[KEY_VOLUMEUP / (8 * sizeof(unsigned long))] >>
-                                (KEY_VOLUMEUP % (8 * sizeof(unsigned long)))) & 1;
+                const int has_volup = (keybits[KEY_VOLUMEUP / __BITS_PER_LONG] >>
+                                        (KEY_VOLUMEUP % __BITS_PER_LONG)) & 1;
                 if (has_volup) {
                     const int n = count_bits_set(keybits, KEYBITS_WORDS);
                     log_verbose("%s supports KEY_VOLUMEUP, %d total keys", g_vol_dev, n);
@@ -192,14 +195,14 @@ static int acquire_singleton_lock(const char *name)
     const size_t name_len = strlen(name);
     struct sockaddr_un addr;
 
-    if (name_len > sizeof(addr.sun_path) - 1) {
-        log_msg("singleton lock name too long");
+    if (__predict_false(name_len > sizeof(addr.sun_path) - 1)) {
+        log_verbose("singleton lock name too long");
         return -1;
     }
 
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
-        log_msg("socket() for singleton lock failed: %s", strerror(errno));
+        __log_msg("socket() for singleton lock failed: %s", strerror(errno));
         return -1;
     }
 
@@ -211,9 +214,9 @@ static int acquire_singleton_lock(const char *name)
 
     if (bind(fd, (struct sockaddr *)&addr, addr_len) < 0) {
         if (errno == EADDRINUSE)
-            log_msg("another instance is already running");
+            __log_msg("another instance is already running");
         else
-            log_msg("bind() for singleton lock failed: %s", strerror(errno));
+            __log_msg("bind() for singleton lock failed: %s", strerror(errno));
         close(fd);
         return -1;
     }
@@ -269,14 +272,13 @@ static void daemonise()
 
 static void usage(const char *argv0)
 {
-    fprintf(stderr,
+    __log_msg(
         "usage: %s [-f] [-v] [--vol-name NAME]\n"
         "  -f              stay in foreground, log to stderr (default: daemonise)\n"
         "  -v              verbose logging\n"
         "  --vol-name      evdev name (not path) for the volume keys (default: auto-detect by\n"
-        "                  finding the KEY_VOLUMEUP-supporting device\n"
-        "                  with the fewest keys)\n",
-        argv0);
+        "                  finding the KEY_VOLUMEUP-supporting device with the fewest keys)",
+        argv0 ? basename(argv0) : "");
 }
 
 int main(int argc, char **argv)
@@ -300,14 +302,13 @@ int main(int argc, char **argv)
         }
     }
 
-    g_singleton_fd = acquire_singleton_lock("vol_wake_daemon");
-    if (g_singleton_fd < 0)
+    if ((g_singleton_fd = acquire_singleton_lock("vol_wake_daemon")) < 0)
         return EXIT_FAILURE;
 
-    apply_low_priority();
-
-    if (!g_foreground)
+    if (!g_foreground) {
+        apply_low_priority();
         daemonise();
+    }
 
     const int vol_fd = open_volume_key_device(vol_name);
     if (vol_fd == -1) {
@@ -329,17 +330,20 @@ int main(int argc, char **argv)
     pfds[0].fd = vol_fd;    pfds[0].events = POLLIN; pfds[0].revents = 0;
     pfds[1].fd = binder_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
 
+    int ret = EXIT_SUCCESS;
     while (g_running) {
-        const int ret = poll(pfds, 2, -1);
+        const int nready = poll(pfds, 2, -1);
 
-        if (__predict_false(ret < 0)) {
+        if (__predict_false(nready < 0)) {
             if (errno == EINTR) continue;
-            log_msg("poll failed: %s", strerror(errno));
+            log_msg("poll failed, exiting: %s", strerror(errno));
+            ret = EXIT_FAILURE;
             break;
         }
 
         if (__predict_false(pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
             log_msg("vol_fd error (revents=0x%x), exiting", pfds[0].revents);
+            ret = EXIT_FAILURE;
             break;
         }
 
@@ -362,11 +366,13 @@ int main(int argc, char **argv)
 
             if (__predict_false(n == 0)) {
                 log_msg("vol_fd hit EOF, exiting");
+                ret = EXIT_FAILURE;
                 break;
             }
 
             if (__predict_false(n < 0 && errno != EAGAIN)) {
-                log_msg("read failed: %s", strerror(errno));
+                log_msg("read failed, exiting: %s", strerror(errno));
+                ret = EXIT_FAILURE;
                 break;
             }
         }
@@ -374,5 +380,5 @@ int main(int argc, char **argv)
 
     log_verbose("exiting");
     close(vol_fd);
-    return EXIT_SUCCESS;
+    return ret;
 }
