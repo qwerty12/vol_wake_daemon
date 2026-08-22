@@ -75,5 +75,5 @@ void wakeUpScreen()
     if (__predict_false(!input && !connectInputService()))
         return;
 
-    IBinder::shellCommand(input, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, args, nullptr, nullptr);
+    (void)IBinder::shellCommand(input, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, args, nullptr, nullptr);
 }

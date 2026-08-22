@@ -1,3 +1,6 @@
+#define _GNU_SOURCE 1
+
+#include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -31,6 +34,8 @@
 
 #include "BinderGlue.h"
 #include "IsInteractive.h"
+
+#define SINGLETON_NAME "vol_wake_daemon"
 
 static int g_verbose   = 0;
 static int g_foreground = 0;
@@ -145,7 +150,7 @@ static void apply_low_priority(void)
     if (setpriority(PRIO_PROCESS, 0, 19) < 0)
         log_verbose("setpriority failed: %s", strerror(errno));
 
-    struct sched_param sp = { .sched_priority = 0 };
+    struct sched_param sp = { 0 };
     if (__predict_false(sched_setscheduler(0, SCHED_IDLE, &sp) < 0)) {
         log_verbose("sched_setscheduler(SCHED_IDLE) failed, trying SCHED_BATCH: %s", strerror(errno));
         sched_setscheduler(0, SCHED_BATCH, &sp);
@@ -190,15 +195,12 @@ static int is_screen_on(void)
     return 0;
 }
 
-static int acquire_singleton_lock(const char *name)
+static int acquire_singleton_lock(void)
 {
-    const size_t name_len = strlen(name);
+    const size_t name_len = sizeof(SINGLETON_NAME) - 1;
     struct sockaddr_un addr;
 
-    if (__predict_false(name_len > sizeof(addr.sun_path) - 1)) {
-        log_verbose("singleton lock name too long");
-        return -1;
-    }
+    _Static_assert(name_len <= sizeof(((struct sockaddr_un *)0)->sun_path) - 1, "singleton lock name too long");
 
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -208,9 +210,8 @@ static int acquire_singleton_lock(const char *name)
 
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path + 1, name, name_len);
-    const socklen_t addr_len =
-        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
+    memcpy(addr.sun_path + 1, SINGLETON_NAME, name_len);
+    const socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
 
     if (bind(fd, (struct sockaddr *)&addr, addr_len) < 0) {
         if (errno == EADDRINUSE)
@@ -224,7 +225,7 @@ static int acquire_singleton_lock(const char *name)
     return fd;
 }
 
-static void daemonise()
+static void daemonise(void)
 {
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
@@ -302,7 +303,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if ((g_singleton_fd = acquire_singleton_lock("vol_wake_daemon")) < 0)
+    if ((g_singleton_fd = acquire_singleton_lock()) < 0)
         return EXIT_FAILURE;
 
     if (!g_foreground) {
@@ -379,6 +380,8 @@ int main(int argc, char **argv)
     }
 
     log_verbose("exiting");
+    close(g_singleton_fd);
+    close(binder_fd);
     close(vol_fd);
     return ret;
 }
