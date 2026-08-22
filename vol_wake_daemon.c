@@ -145,8 +145,64 @@ static int open_volume_key_device(const char *vol_name)
     return best_fd;
 }
 
+static void parse_cpuset_cpus(char *cpus, cpu_set_t *cpu_set)
+{
+    /* Copyright 2006, The Android Open Source Project
+     * Licensed under the Apache License, Version 2.0 */
+    char *saveptr;
+    char *cpu_range = strtok_r(cpus, ",", &saveptr);
+
+    while (cpu_range) {
+        unsigned int start = 0, end = 0;
+        const int matched = sscanf(cpu_range, "%u-%u", &start, &end);
+        cpu_range = strtok_r(NULL, ",", &saveptr);
+
+        if (start >= CPU_SETSIZE) {
+            log_verbose("parse_cpuset_cpus: ignoring CPU number larger than %d", CPU_SETSIZE);
+            continue;
+        }
+        if (end >= CPU_SETSIZE)
+            end = CPU_SETSIZE - 1;
+
+        if (matched == 1) {
+            CPU_SET(start, cpu_set);
+        } else if (matched == 2) {
+            for (unsigned int i = start; i <= end; ++i)
+                CPU_SET(i, cpu_set);
+        } else {
+            log_verbose("parse_cpuset_cpus: failed to match \"%s\"", cpu_range);
+        }
+    }
+}
+
+static void set_background_affinity(cpu_set_t *cpu_set)
+{
+    CPU_ZERO(cpu_set);
+
+    FILE *file = fopen("/dev/cpuset/background/cpus", "re");
+    if (file) {
+        char *line = NULL;
+        size_t len = 0;
+        const ssize_t num_read = getline(&line, &len, file);
+        fclose(file);
+        if (num_read > 0)
+            parse_cpuset_cpus(line, cpu_set);
+        else
+            log_verbose("failed to read background cpuset");
+        free(line);
+    }
+
+    if (!CPU_COUNT(cpu_set)) {
+        CPU_SET(0, cpu_set);
+        CPU_SET(1, cpu_set);
+    }
+}
+
 static void apply_low_priority(void)
 {
+    cpu_set_t cpu_set;
+    set_background_affinity(&cpu_set);
+
     if (setpriority(PRIO_PROCESS, 0, 19) < 0)
         log_verbose("setpriority failed: %s", strerror(errno));
 
@@ -156,10 +212,6 @@ static void apply_low_priority(void)
         sched_setscheduler(0, SCHED_BATCH, &sp);
     }
 
-    cpu_set_t cpu_set;
-    CPU_ZERO(&cpu_set);
-    CPU_SET(0, &cpu_set);
-    CPU_SET(1, &cpu_set);
     if (sched_setaffinity(0, sizeof(cpu_set), &cpu_set) < 0)
         log_verbose("sched_setaffinity failed: %s", strerror(errno));
 
@@ -183,16 +235,6 @@ static void apply_low_priority(void)
             log_verbose("sched_setattr(uclamp.max) unavailable: %s", strerror(errno));
     }
 #endif
-}
-
-static int is_screen_on(void)
-{
-    const int interactive = IsInteractive();
-    if (__predict_true(interactive != -1))
-        return interactive;
-
-    log_verbose("IsInteractive() unavailable; assuming screen may be off");
-    return 0;
 }
 
 static int acquire_singleton_lock(void)
@@ -269,6 +311,16 @@ static void daemonise(void)
     if (devnull > STDERR_FILENO) close(devnull);
 
     if (chdir("/") < 0) exit(EXIT_FAILURE);
+}
+
+static int is_screen_on(void)
+{
+    const int interactive = IsInteractive();
+    if (__predict_true(interactive != -1))
+        return interactive;
+
+    log_verbose("IsInteractive() unavailable; assuming screen may be off");
+    return 0;
 }
 
 static void usage(const char *argv0)
