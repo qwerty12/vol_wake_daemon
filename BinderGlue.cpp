@@ -25,54 +25,47 @@ class InputDeathRecipient : public IBinder::DeathRecipient
 };
 const static sp<InputDeathRecipient> gDeathNotifier(new InputDeathRecipient);
 
-void OnBinderReadReady()
+void OnBinderReadReady(void)
 {
     IPCThreadState::self()->handlePolledCommands();
 }
 
-int SetupBinderOrCrash()
+int SetupBinder(void)
 {
     int binder_fd = -1;
+
     ProcessState::self()->setThreadPoolMaxThreadCount(0);
     IPCThreadState::self()->disableBackgroundScheduling(true);
     const int err = IPCThreadState::self()->setupPolling(&binder_fd);
-    if (err) {
-        fprintf(stderr, "Error setting up binder polling: %s\n", strerror(-err));
-        exit(EXIT_FAILURE);
-    }
-
-    if (binder_fd < 0) {
-        fprintf(stderr, "Invalid binder FD: %d\n", binder_fd);
-        exit(EXIT_FAILURE);
-    }
+    if (__predict_false(err != 0))
+        return err;
 
     return binder_fd;
 }
 
-static bool connectInputService()
+bool ConnectInputService(void)
 {
     const sp<IServiceManager> sm = defaultServiceManager();
-    if (!sm)
+    if (__predict_false(!sm))
         return false;
 
     input = sm->getService(String16("input"));
-    if (!input)
+    if (__predict_false(!input))
         return false;
 
-    input->linkToDeath(gDeathNotifier);
+    (void)input->linkToDeath(gDeathNotifier);
 
-    return true;
-}
-
-void wakeUpScreen()
-{
-    if (args.empty())
-    {
+    if (args.empty()) {
         args.add(String16("keyevent"));
         args.add(String16("KEYCODE_WAKEUP"));
     }
 
-    if (__predict_false(!input && !connectInputService()))
+    return true;
+}
+
+void WakeUpScreen(void)
+{
+    if (__predict_false(!input && !ConnectInputService()))
         return;
 
     (void)IBinder::shellCommand(input, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, args, nullptr, nullptr);

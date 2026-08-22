@@ -3,9 +3,12 @@
 
 #ifdef __cplusplus
 extern "C" {
+#else
+#include <stdbool.h>
 #endif
 
-int IsInteractive(void);
+bool ConnectPowerService(void);
+int  IsInteractive(void);
 
 #ifdef __cplusplus
 }

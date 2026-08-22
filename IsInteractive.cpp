@@ -4,6 +4,7 @@
  *   grep -R "TRANSACTION_isInteractive" out/sources/android/os/IPowerManager*.java
  */
 
+#include <sys/cdefs.h>
 #include <utils/String16.h>
 #include <binder/Parcel.h>
 #include <binder/IBinder.h>
@@ -55,37 +56,37 @@ class PowerManagerDeathRecipient : public IBinder::DeathRecipient
 };
 const static sp<PowerManagerDeathRecipient> gDeathNotifier(new PowerManagerDeathRecipient);
 
-static bool connectPowerService()
+bool ConnectPowerService(void)
 {
     const sp<IServiceManager> sm = defaultServiceManager();
-    if (!sm)
+    if (__predict_false(!sm))
         return false;
 
     const sp<IBinder> binder = sm->getService(String16("power"));
-    if (!binder)
+    if (__predict_false(!binder))
         return false;
 
     power_manager = interface_cast<IPowerManager>(binder);
-    if (!power_manager)
+    if (__predict_false(!power_manager))
         return false;
 
-    binder->linkToDeath(gDeathNotifier);
+    (void)binder->linkToDeath(gDeathNotifier);
 
     return true;
 }
 
-int IsInteractive()
+int IsInteractive(void)
 {
     Parcel reply;
 
-    if (!power_manager && !connectPowerService())
+    if (__predict_false(!power_manager && !ConnectPowerService()))
         return -1;
 
-    if (!power_manager->isInteractive(&reply))
+    if (__predict_false(!power_manager->isInteractive(&reply)))
         return -1;
 
-    int32_t status = reply.readInt32();
-    if (status != OK)
+    const int32_t status = reply.readInt32();
+    if (__predict_false(status != OK))
         return -1;
 
     return reply.readBool() ? 1 : 0;

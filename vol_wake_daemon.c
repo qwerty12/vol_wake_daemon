@@ -35,17 +35,16 @@
 #include "BinderGlue.h"
 #include "IsInteractive.h"
 
-#define SINGLETON_NAME "vol_wake_daemon"
+#define SINGLETON_NAME "volwakedaemon_6CDB7CC6-4DAC-4fcf-B81B-48BCDAD85DED"
 
 static int g_verbose   = 0;
 static int g_foreground = 0;
 
 static char g_vol_dev[PATH_MAX];
 static volatile sig_atomic_t g_running = 1;
-static int g_singleton_fd = -1;
 
-#define log_msg(...) do { if (g_foreground) __log_msg(__VA_ARGS__); } while (0)
-#define log_verbose(...) do { if (g_verbose && g_foreground) __log_msg(__VA_ARGS__); } while (0)
+#define log_msg(...) do { if (__predict_false(g_foreground)) __log_msg(__VA_ARGS__); } while (0)
+#define log_verbose(...) do { if (__predict_false(g_verbose && g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 
 static void __log_msg(const char *fmt, ...)
 {
@@ -112,7 +111,7 @@ static int open_volume_key_device(const char *vol_name)
         }
 
         if (vol_name) {
-            if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 1 && !strcmp(name, vol_name)) {
+            if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 1 && strcmp(name, vol_name) == 0) {
                 best_fd = fd;
                 break;
             }
@@ -181,18 +180,21 @@ static void set_background_affinity(cpu_set_t *cpu_set)
 
     FILE *file = fopen("/dev/cpuset/background/cpus", "re");
     if (file) {
-        char *line = NULL;
-        size_t len = 0;
-        const ssize_t num_read = getline(&line, &len, file);
-        fclose(file);
-        if (num_read > 0)
-            parse_cpuset_cpus(line, cpu_set);
-        else
+        char line[128];
+        if (fgets(line, sizeof(line), file)) {
+            const size_t len = strlen(line);
+            if ((len > 0 && line[len - 1] == '\n') || fgetc(file) == EOF)
+                parse_cpuset_cpus(line, cpu_set);
+            else
+                log_verbose("background cpuset line too long, ignoring");
+        } else {
             log_verbose("failed to read background cpuset");
-        free(line);
+        }
+        fclose(file);
     }
 
-    if (!CPU_COUNT(cpu_set)) {
+    if (CPU_COUNT(cpu_set) < 2) {
+        CPU_ZERO(cpu_set);
         CPU_SET(0, cpu_set);
         CPU_SET(1, cpu_set);
     }
@@ -215,7 +217,7 @@ static void apply_low_priority(void)
     if (sched_setaffinity(0, sizeof(cpu_set), &cpu_set) < 0)
         log_verbose("sched_setaffinity failed: %s", strerror(errno));
 
-    if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) < 0) {
+    if (__predict_false(syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) < 0)) {
         log_verbose("ioprio_set failed, trying best effort: %s", strerror(errno));
         syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 7));
     }
@@ -267,13 +269,13 @@ static int acquire_singleton_lock(void)
     return fd;
 }
 
-static void daemonise(void)
+static void daemonise(const int keep_fd)
 {
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         const rlim_t max_fd = (rl.rlim_max == RLIM_INFINITY) ? 1024 : rl.rlim_max;
         for (rlim_t i = STDERR_FILENO + 1; i < max_fd; ++i) {
-            if ((int)i == g_singleton_fd)
+            if (__predict_false((int)i == keep_fd))
                 continue;
             close((int)i);
         }
@@ -308,9 +310,9 @@ static void daemonise(void)
     dup2(devnull, STDIN_FILENO);
     dup2(devnull, STDOUT_FILENO);
     dup2(devnull, STDERR_FILENO);
-    if (devnull > STDERR_FILENO) close(devnull);
+    if (__predict_false(devnull > STDERR_FILENO)) close(devnull);
 
-    if (chdir("/") < 0) exit(EXIT_FAILURE);
+    if (__predict_false(chdir("/") < 0)) exit(EXIT_FAILURE);
 }
 
 static int is_screen_on(void)
@@ -331,7 +333,7 @@ static void usage(const char *argv0)
         "  -v              verbose logging\n"
         "  --vol-name      evdev name (not path) for the volume keys (default: auto-detect by\n"
         "                  finding the KEY_VOLUMEUP-supporting device with the fewest keys)",
-        argv0 ? basename(argv0) : "");
+        __predict_true(argv0) ? basename(argv0) : "");
 }
 
 int main(int argc, char **argv)
@@ -355,35 +357,51 @@ int main(int argc, char **argv)
         }
     }
 
-    if ((g_singleton_fd = acquire_singleton_lock()) < 0)
+    const int singleton_fd = acquire_singleton_lock();
+    if (singleton_fd < 0)
         return EXIT_FAILURE;
 
-    if (!g_foreground) {
+    if (__predict_true(!g_foreground)) {
         apply_low_priority();
-        daemonise();
+        daemonise(singleton_fd);
     }
 
+    int ret = EXIT_SUCCESS;
+
     const int vol_fd = open_volume_key_device(vol_name);
+    const int binder_fd = vol_fd != -1 ? SetupBinder() : -1;
     if (vol_fd == -1) {
         if (!vol_name)
             log_msg("no evdev device advertises KEY_VOLUMEUP support; pass --vol-name explicitly");
         else
             log_msg("could not find an input device matching \"%s\"", vol_name);
-        return EXIT_FAILURE;
+        ret = EXIT_FAILURE;
+        goto end;
     }
-
-    const int binder_fd = SetupBinderOrCrash();
+    if (__predict_false(binder_fd < 0)) {
+        if (__predict_true(binder_fd != -1))
+            log_msg("error setting up Binder polling: %s", strerror(-binder_fd));
+        else
+            log_msg("invalid Binder FD (or maybe EPERM)");
+        ret = EXIT_FAILURE;
+        goto end;
+    }
 
     log_verbose("vol=%s pid=%d", g_vol_dev, (int)getpid());
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    if (__predict_false(!ConnectPowerService() || !ConnectInputService())) {
+        log_msg("failed to connect to a Binder service");
+        ret = EXIT_FAILURE;
+        goto end;
+    }
+
     struct pollfd pfds[2];
     pfds[0].fd = vol_fd;    pfds[0].events = POLLIN; pfds[0].revents = 0;
     pfds[1].fd = binder_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
 
-    int ret = EXIT_SUCCESS;
     while (g_running) {
         const int nready = poll(pfds, 2, -1);
 
@@ -391,13 +409,13 @@ int main(int argc, char **argv)
             if (errno == EINTR) continue;
             log_msg("poll failed, exiting: %s", strerror(errno));
             ret = EXIT_FAILURE;
-            break;
+            goto end;
         }
 
         if (__predict_false(pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
             log_msg("vol_fd error (revents=0x%x), exiting", pfds[0].revents);
             ret = EXIT_FAILURE;
-            break;
+            goto end;
         }
 
         if (__predict_false(pfds[1].revents & POLLIN))
@@ -411,7 +429,7 @@ int main(int argc, char **argv)
                     if (is_screen_on()) {
                         log_verbose("volume-up down: screen already on, skipping wake");
                     } else {
-                        wakeUpScreen();
+                        WakeUpScreen();
                         log_msg("volume-up down: waking screen");
                     }
                 }
@@ -420,20 +438,24 @@ int main(int argc, char **argv)
             if (__predict_false(n == 0)) {
                 log_msg("vol_fd hit EOF, exiting");
                 ret = EXIT_FAILURE;
-                break;
+                goto end;
             }
 
             if (__predict_false(n < 0 && errno != EAGAIN)) {
                 log_msg("read failed, exiting: %s", strerror(errno));
                 ret = EXIT_FAILURE;
-                break;
+                goto end;
             }
         }
     }
 
     log_verbose("exiting");
-    close(g_singleton_fd);
-    close(binder_fd);
-    close(vol_fd);
+end:
+    if (singleton_fd != -1)
+        close(singleton_fd);
+    if (binder_fd != -1)
+        close(binder_fd);
+    if (vol_fd != -1)
+        close(vol_fd);
     return ret;
 }
