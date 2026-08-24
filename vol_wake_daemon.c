@@ -30,12 +30,13 @@
 
 #include <linux/input.h>
 #include <linux/ioprio.h>
+#include <linux/uinput.h>
 #include <linux/sched/types.h>
 
 #include "BinderGlue.h"
 #include "IsInteractive.h"
 
-#define SINGLETON_NAME "volwakedaemon_6CDB7CC6-4DAC-4fcf-B81B-48BCDAD85DED"
+#define SINGLETON_NAME "vol_wake_daemon#6CDB7CC6-4DAC-4fcf-B81B-48BCDAD85DED"
 
 static int g_verbose   = 0;
 static int g_foreground = 0;
@@ -43,10 +44,12 @@ static int g_foreground = 0;
 static char g_vol_dev[PATH_MAX];
 static volatile sig_atomic_t g_running = 1;
 
+#define inline_force __attribute__((always_inline)) inline
+
 #define log_msg(...) do { if (__predict_false(g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 #define log_verbose(...) do { if (__predict_false(g_verbose && g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 
-static void __log_msg(const char *fmt, ...)
+static __attribute__((noinline)) void __log_msg(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -63,7 +66,7 @@ static void on_signal(__unused const int sig)
 
 #define KEYBITS_WORDS howmany(KEY_MAX + 1, __BITS_PER_LONG)
 
-static int count_bits_set(const unsigned long *bits, const size_t nwords)
+static inline_force int count_bits_set(const unsigned long *bits, const size_t nwords)
 {
     int count = 0;
     for (size_t i = 0; i < nwords; ++i)
@@ -288,10 +291,10 @@ static void daemonise(const int keep_fd)
     sigprocmask(SIG_SETMASK, &empty_set, NULL);
 
     pid_t pid = fork();
-    if (pid < 0) { perror("fork"); exit(EXIT_FAILURE); }
+    if (pid < 0) { __log_msg("fork: %m"); exit(EXIT_FAILURE); }
     if (pid > 0) _exit(EXIT_SUCCESS);
 
-    if (setsid() < 0) { perror("setsid"); exit(EXIT_FAILURE); }
+    if (setsid() < 0) { __log_msg("setsid: %m"); exit(EXIT_FAILURE); }
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
 
@@ -315,7 +318,69 @@ static void daemonise(const int keep_fd)
     if (__predict_false(chdir("/") < 0)) exit(EXIT_FAILURE);
 }
 
-static int is_screen_on(void)
+static inline_force int uinput_emit(struct input_event *ev, const int fd, const int type, const int code, const int val)
+{
+    ev->type = type;
+    ev->code = code;
+    ev->value = val;
+    /* timestamp values below are ignored */
+    ev->input_event_sec = ev->input_event_usec = 0;
+    return __predict_true(write(fd, ev, sizeof(struct input_event)) == sizeof(struct input_event)) ? 1 : 0;
+}
+
+static int uinput_init(const int allowed_keycode)
+{
+    const int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (__predict_false(fd < 0)) {
+        log_msg("open /dev/uinput: %m");
+        return -1;
+    }
+
+    if (__predict_false(
+        ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0 ||
+        ioctl(fd, UI_SET_EVBIT, EV_SYN) < 0 ||
+        ioctl(fd, UI_SET_KEYBIT, allowed_keycode) < 0
+    )) {
+        log_verbose("UI_SET_{EV,KEY}BIT: %m");
+        close(fd);
+        return -1;
+    }
+
+    struct uinput_setup usetup;
+    memset(&usetup, 0, sizeof(usetup));
+    usetup.id.bustype = BUS_VIRTUAL;
+    usetup.id.vendor = 0x7239;
+    usetup.id.product = 0x3666;
+    strlcpy(usetup.name, "vol_wake_daemon", sizeof(usetup.name));
+
+    if (__predict_false(ioctl(fd, UI_DEV_SETUP, &usetup) < 0)) {
+        log_msg("UI_DEV_SETUP: %m");
+        close(fd);
+        return -1;
+    }
+
+    if (__predict_false(ioctl(fd, UI_DEV_CREATE) < 0)) {
+        log_msg("UI_DEV_CREATE: %m");
+        close(fd);
+        return -1;
+    }
+
+    usleep(150 * 1000);
+
+    return fd;
+}
+
+static inline_force void wakeup_screen(const int uinput_fd)
+{
+    static struct input_event ev;
+    if (__predict_true(uinput_emit(&ev, uinput_fd, EV_KEY, KEY_WAKEUP, 1)))
+        (void)uinput_emit(&ev, uinput_fd, EV_SYN, SYN_REPORT, 0);
+
+    (void)uinput_emit(&ev, uinput_fd, EV_KEY, KEY_WAKEUP, 0);
+    (void)uinput_emit(&ev, uinput_fd, EV_SYN, SYN_REPORT, 0);
+}
+
+static inline_force int is_screen_on(void)
 {
     const int interactive = IsInteractive();
     if (__predict_true(interactive != -1))
@@ -369,8 +434,9 @@ int main(int argc, char **argv)
     int ret = EXIT_SUCCESS;
 
     const int vol_fd = open_volume_key_device(vol_name);
-    const int binder_fd = vol_fd != -1 ? SetupBinder() : -1;
-    if (vol_fd == -1) {
+    const int binder_fd = vol_fd > -1 ? SetupBinder() : -1;
+    int uinput_fd = -1;
+    if (vol_fd < 0) {
         if (!vol_name)
             log_msg("no evdev device advertises KEY_VOLUMEUP support; pass --vol-name explicitly");
         else
@@ -387,16 +453,21 @@ int main(int argc, char **argv)
         goto end;
     }
 
-    log_verbose("vol=%s pid=%d", g_vol_dev, (int)getpid());
-
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    if (__predict_false(!ConnectPowerService() || !ConnectInputService())) {
-        log_msg("failed to connect to a Binder service");
+    if (__predict_false(!ConnectPowerService())) {
+        log_msg("failed to connect to the power service via Binder");
         ret = EXIT_FAILURE;
         goto end;
     }
+
+    if (__predict_false((uinput_fd = uinput_init(KEY_WAKEUP)) < 0)) {
+        ret = EXIT_FAILURE;
+        goto end;
+    }
+
+    log_verbose("vol=%s pid=%ld", g_vol_dev, (long)getpid());
 
     struct pollfd pfds[2];
     pfds[0].fd = vol_fd;    pfds[0].events = POLLIN; pfds[0].revents = 0;
@@ -429,7 +500,7 @@ int main(int argc, char **argv)
                     if (is_screen_on()) {
                         log_verbose("volume-up down: screen already on, skipping wake");
                     } else {
-                        WakeUpScreen();
+                        wakeup_screen(uinput_fd);
                         log_msg("volume-up down: waking screen");
                     }
                 }
@@ -453,6 +524,10 @@ int main(int argc, char **argv)
 end:
     if (singleton_fd != -1)
         close(singleton_fd);
+    if (uinput_fd != -1) {
+        ioctl(uinput_fd, UI_DEV_DESTROY);
+        close(uinput_fd);
+    }
     if (binder_fd != -1)
         close(binder_fd);
     if (vol_fd != -1)
