@@ -33,8 +33,8 @@
 #include <linux/uinput.h>
 #include <linux/sched/types.h>
 
-#include "BinderGlue.h"
-#include "IsInteractive.h"
+#include "binder_glue.h"
+#include "is_interactive.h"
 
 #define SINGLETON_NAME "vol_wake_daemon#6CDB7CC6-4DAC-4fcf-B81B-48BCDAD85DED"
 
@@ -49,7 +49,10 @@ static volatile sig_atomic_t g_running = 1;
 #define log_msg(...) do { if (__predict_false(g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 #define log_verbose(...) do { if (__predict_false(g_verbose && g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 
-static __attribute__((noinline)) void __log_msg(const char *fmt, ...)
+#ifdef HAVE_LOCAL_LIBBINDER_NDK
+static
+#endif
+__attribute__((noinline)) void __log_msg(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -318,14 +321,13 @@ static void daemonise(const int keep_fd)
     if (__predict_false(chdir("/") < 0)) exit(EXIT_FAILURE);
 }
 
-static inline_force int uinput_emit(struct input_event *ev, const int fd, const int type, const int code, const int val)
+static inline_force int uinput_emit(struct input_event *ev, const int fd, const unsigned short type, const unsigned short code, const int val)
 {
     ev->type = type;
     ev->code = code;
     ev->value = val;
-    /* timestamp values below are ignored */
-    ev->input_event_sec = ev->input_event_usec = 0;
-    return __predict_true(write(fd, ev, sizeof(struct input_event)) == sizeof(struct input_event)) ? 1 : 0;
+    ev->input_event_sec = ev->input_event_usec = 0; // timestamp values are ignored
+    return (int)__predict_true(write(fd, ev, sizeof(struct input_event)) == sizeof(struct input_event));
 }
 
 static int uinput_init(const int allowed_keycode)
