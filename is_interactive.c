@@ -1,5 +1,3 @@
-#include <sys/cdefs.h>
-
 #include <android/binder_ibinder.h>
 #include <android/binder_parcel.h>
 #include <android/binder_status.h>
@@ -30,10 +28,11 @@ static binder_status_t stub_onTransact(__unused AIBinder *binder, __unused trans
 
 static void service_died(__unused void *cookie)
 {
-    if (g_power_manager) {
-        AIBinder_decStrong(g_power_manager);
-        g_power_manager = NULL;
-    }
+    if (__predict_false(!g_power_manager))
+        return;
+
+    AIBinder_decStrong(g_power_manager);
+    g_power_manager = NULL;
 }
 
 bool ConnectPowerService(void)
@@ -68,8 +67,7 @@ int IsInteractive(void)
     if (__predict_false(!g_power_manager && !ConnectPowerService()))
         return -1;
 
-    AParcel *in = NULL;
-    AParcel *out = NULL;
+    AParcel *in = NULL, *out = NULL;
 
     binder_status_t status = AIBinder_prepareTransaction(g_power_manager, &in);
     if (__predict_false(status != STATUS_OK))

@@ -1,4 +1,3 @@
-#include <sys/cdefs.h>
 #include <android/binder_status.h>
 #include "binder_ndk_compat.h"
 
