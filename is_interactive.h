@@ -2,8 +2,9 @@
 #define ISINTERACTIVE_H
 
 #include <stdbool.h>
+#include <sys/cdefs.h>
 
-bool ConnectPowerService(void);
-int  IsInteractive(void);
+bool ConnectPowerService(void) __wur;
+int  IsInteractive(void) __wur;
 
 #endif /*ISINTERACTIVE_H*/

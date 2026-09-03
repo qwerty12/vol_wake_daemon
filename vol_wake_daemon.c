@@ -44,22 +44,19 @@ static int g_foreground = 0;
 static char g_vol_dev[PATH_MAX];
 static volatile sig_atomic_t g_running = 1;
 
-#define inline_force __attribute__((always_inline)) inline
-
 #define log_msg(...) do { if (__predict_false(g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 #define log_verbose(...) do { if (__predict_false(g_verbose && g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 
 #ifdef HAVE_LOCAL_LIBBINDER_NDK
 static
 #endif
-__attribute__((noinline)) void __log_msg(const char *fmt, ...)
+__attribute__((noinline)) __printflike(1, 2) void __log_msg(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
-    fflush(stderr);
 }
 
 static void on_signal(__unused const int sig)
@@ -69,7 +66,7 @@ static void on_signal(__unused const int sig)
 
 #define KEYBITS_WORDS howmany(KEY_MAX + 1, __BITS_PER_LONG)
 
-static inline_force int count_bits_set(const unsigned long *bits, const size_t nwords)
+static __attribute_pure__ __always_inline inline int count_bits_set(const unsigned long *bits, const size_t nwords)
 {
     int count = 0;
     for (size_t i = 0; i < nwords; ++i)
@@ -85,16 +82,11 @@ static int open_volume_key_device(const char *vol_name)
     DIR *dir;
     struct dirent *de;
 
-    char name[80];
     int best_fd = -1, best_count = -1;
-    unsigned long keybits[KEYBITS_WORDS];
     char best_path[sizeof(g_vol_dev)];
 
     if (!(dir = opendir(device_path)))
         return -1;
-
-    if (vol_name)
-        name[sizeof(name) - 1] = '\0';
 
     strlcpy(g_vol_dev, device_path, sizeof(g_vol_dev));
     filename = g_vol_dev + strlen(device_path);
@@ -117,12 +109,14 @@ static int open_volume_key_device(const char *vol_name)
         }
 
         if (vol_name) {
+            char name[80];
+            name[sizeof(name) - 1] = '\0';
             if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 1 && strcmp(name, vol_name) == 0) {
                 best_fd = fd;
                 break;
             }
         } else {
-            memset(keybits, 0, sizeof(keybits));
+            unsigned long keybits[KEYBITS_WORDS] = { 0 };
             if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0) {
                 const int has_volup = (keybits[KEY_VOLUMEUP / __BITS_PER_LONG] >>
                                         (KEY_VOLUMEUP % __BITS_PER_LONG)) & 1;
@@ -233,13 +227,12 @@ static void apply_low_priority(void)
 
 #if 0
     if (access("/proc/sys/kernel/sched_util_clamp_min", F_OK) == 0) {
-        struct sched_attr attr;
-        memset(&attr, 0, sizeof(attr));
+        struct sched_attr attr = { 0 };
         attr.size = sizeof(attr);
         attr.sched_flags = SCHED_FLAG_UTIL_CLAMP | SCHED_FLAG_KEEP_ALL;
         attr.sched_util_min = 0;   // boost = 0
         attr.sched_util_max = 307; // ~30% of 1024, matches PerfClamp
-        if (syscall(SYS_sched_setattr, 0 /* self */, &attr, 0) < 0)
+        if (syscall(SYS_sched_setattr, 0, &attr, 0) < 0)
             log_verbose("sched_setattr(uclamp.max) unavailable: %s", strerror(errno));
     }
 #endif
@@ -248,7 +241,6 @@ static void apply_low_priority(void)
 static int acquire_singleton_lock(void)
 {
     const size_t name_len = sizeof(SINGLETON_NAME) - 1;
-    struct sockaddr_un addr;
 
     _Static_assert(name_len <= sizeof(((struct sockaddr_un *)0)->sun_path) - 1, "singleton lock name too long");
 
@@ -258,7 +250,7 @@ static int acquire_singleton_lock(void)
         return -1;
     }
 
-    memset(&addr, 0, sizeof(addr));
+    struct sockaddr_un addr = { 0 };
     addr.sun_family = AF_UNIX;
     memcpy(addr.sun_path + 1, SINGLETON_NAME, name_len);
     const socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
@@ -321,7 +313,7 @@ static void daemonise(const int keep_fd)
     if (__predict_false(chdir("/") < 0)) exit(EXIT_FAILURE);
 }
 
-static inline_force int uinput_emit(struct input_event *ev, const int fd, const unsigned short type, const unsigned short code, const int val)
+static __always_inline inline int uinput_emit(struct input_event *ev, const int fd, const unsigned short type, const unsigned short code, const int val)
 {
     ev->type = type;
     ev->code = code;
@@ -348,8 +340,7 @@ static int uinput_init(const int allowed_keycode)
         return -1;
     }
 
-    struct uinput_setup usetup;
-    memset(&usetup, 0, sizeof(usetup));
+    struct uinput_setup usetup = { 0 };
     usetup.id.bustype = BUS_VIRTUAL;
     usetup.id.vendor = 0x7239;
     usetup.id.product = 0x3666;
@@ -372,7 +363,7 @@ static int uinput_init(const int allowed_keycode)
     return fd;
 }
 
-static inline_force void wakeup_screen(const int uinput_fd)
+static __always_inline inline void wakeup_screen(const int uinput_fd)
 {
     static struct input_event ev;
     if (__predict_true(uinput_emit(&ev, uinput_fd, EV_KEY, KEY_WAKEUP, 1)))
@@ -382,7 +373,7 @@ static inline_force void wakeup_screen(const int uinput_fd)
     (void)uinput_emit(&ev, uinput_fd, EV_SYN, SYN_REPORT, 0);
 }
 
-static inline_force int is_screen_on(void)
+static __always_inline inline int is_screen_on(void)
 {
     const int interactive = IsInteractive();
     if (__predict_true(interactive != -1))
@@ -392,7 +383,7 @@ static inline_force int is_screen_on(void)
     return 0;
 }
 
-static void usage(const char *argv0)
+static __attribute__((noinline)) void usage(const char *argv0)
 {
     __log_msg(
         "usage: %s [-f] [-v] [--vol-name NAME]\n"
