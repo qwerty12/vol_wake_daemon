@@ -3,7 +3,7 @@
 
 #include <sys/cdefs.h>
 
-void OnBinderReadReady(void);
-int  SetupBinder(void) __wur;
+__LIBC_HIDDEN__ void OnBinderReadReady(void);
+__LIBC_HIDDEN__ int  SetupBinder(void) __wur;
 
 #endif /*BINDERGLUE_H*/

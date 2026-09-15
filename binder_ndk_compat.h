@@ -1,6 +1,7 @@
 #ifndef BINDER_NDK_COMPAT_H
 #define BINDER_NDK_COMPAT_H
 
+#include <sys/cdefs.h>
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
 
@@ -11,7 +12,7 @@
     X(ABinderProcess_setThreadPoolMaxThreadCount)
 
 #ifdef BINDER_NDK_COMPAT_IMPL
-#define BINDER_NDK_COMPAT_DECL(name) typeof(name) *p_##name;
+#define BINDER_NDK_COMPAT_DECL(name) __LIBC_HIDDEN__ typeof(name) *p_##name;
 #else
 #define BINDER_NDK_COMPAT_DECL(name) extern typeof(name) *p_##name;
 #endif

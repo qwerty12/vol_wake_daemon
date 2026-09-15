@@ -5,6 +5,9 @@
 
 #include "is_interactive.h"
 
+#include "cleanup.h"
+DEFINE_AUTOPTR_CLEANUP(AParcel, AParcel_delete)
+
 /*
  * VERIFY for your target build:
  *   adb pull /system/framework/framework.jar .
@@ -67,7 +70,8 @@ int IsInteractive(void)
     if (__predict_false(!g_power_manager && !ConnectPowerService()))
         return -1;
 
-    AParcel *in = NULL, *out = NULL;
+    AParcel *in = NULL;
+    autoptr(AParcel) out = NULL;
 
     binder_status_t status = AIBinder_prepareTransaction(g_power_manager, &in);
     if (__predict_false(status != STATUS_OK))
@@ -79,14 +83,10 @@ int IsInteractive(void)
 
     int32_t exceptionCode = 0;
     AParcel_readInt32(out, &exceptionCode);
-    if (__predict_false(exceptionCode != 0)) {
-        AParcel_delete(out);
+    if (__predict_false(exceptionCode != 0))
         return -1;
-    }
 
     bool interactive = false;
     AParcel_readBool(out, &interactive);
-    AParcel_delete(out);
-
     return interactive ? 1 : 0;
 }

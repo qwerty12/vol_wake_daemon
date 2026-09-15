@@ -35,6 +35,14 @@
 #include "binder_glue.h"
 #include "is_interactive.h"
 
+#include "cleanup.h"
+typedef int fd_t;
+DEFINE_AUTOVAL_CLEANUP(fd_t, close, -1)
+
+typedef int uinput_fd_t;
+static __always_inline inline void destroy_uinput(const uinput_fd_t fd) { ioctl(fd, UI_DEV_DESTROY); close(fd); }
+DEFINE_AUTOVAL_CLEANUP(uinput_fd_t, destroy_uinput, -1)
+
 #define SINGLETON_NAME "vol_wake_daemon#6CDB7CC6-4DAC-4fcf-B81B-48BCDAD85DED"
 
 static int g_verbose   = 0;
@@ -48,6 +56,8 @@ static volatile sig_atomic_t g_running = 1;
 
 #ifdef HAVE_LOCAL_LIBBINDER_NDK
 static
+#else
+__LIBC_HIDDEN__
 #endif
 __attribute__((noinline)) __printflike(1, 2) void __log_msg(const char *fmt, ...)
 {
@@ -436,7 +446,7 @@ int main(int argc, char **argv)
         }
     }
 
-    const int singleton_fd = acquire_singleton_lock();
+    const autoval(fd_t) singleton_fd = acquire_singleton_lock();
     if (singleton_fd < 0)
         return EXIT_FAILURE;
 
@@ -445,38 +455,32 @@ int main(int argc, char **argv)
         daemonise(singleton_fd);
     }
 
-    int ret = EXIT_SUCCESS;
-    const int vol_fd = open_volume_key_device(vol_name);
-    int binder_fd = -1, uinput_fd = -1;
-
+    const autoval(fd_t) vol_fd = open_volume_key_device(vol_name);
     if (vol_fd < 0) {
         if (!vol_name)
             log_msg("no evdev device advertises KEY_VOLUMEUP support; pass --vol-name explicitly");
         else
             log_msg("could not find an input device matching \"%s\"", vol_name);
-        ret = EXIT_FAILURE;
-        goto end;
+        return EXIT_FAILURE;
     }
 
-    if (__predict_false((binder_fd = SetupBinder()) < 0)) {
+    const autoval(fd_t) binder_fd = SetupBinder();
+    if (__predict_false(binder_fd < 0)) {
         if (__predict_true(binder_fd != -1))
             log_msg("error setting up Binder polling: %s", strerror(-binder_fd));
         else
             log_msg("invalid Binder FD (or maybe EPERM)");
-        ret = EXIT_FAILURE;
-        goto end;
+        return EXIT_FAILURE;
     }
 
     if (__predict_false(!ConnectPowerService())) {
         log_msg("failed to connect to the power service via Binder");
-        ret = EXIT_FAILURE;
-        goto end;
+        return EXIT_FAILURE;
     }
 
-    if (__predict_false((uinput_fd = uinput_init(KEY_WAKEUP)) < 0)) {
-        ret = EXIT_FAILURE;
-        goto end;
-    }
+    const autoval(uinput_fd_t) uinput_fd = uinput_init(KEY_WAKEUP);
+    if (__predict_false(uinput_fd < 0))
+        return EXIT_FAILURE;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -493,14 +497,12 @@ int main(int argc, char **argv)
         if (__predict_false(nready < 0)) {
             if (errno == EINTR) continue;
             log_msg("poll failed, exiting: %m");
-            ret = EXIT_FAILURE;
-            goto end;
+            return EXIT_FAILURE;
         }
 
         if (__predict_false(pfds[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
             log_msg("vol_fd error (revents=0x%x), exiting", pfds[0].revents);
-            ret = EXIT_FAILURE;
-            goto end;
+            return EXIT_FAILURE;
         }
 
         if (__predict_false(pfds[1].revents & POLLIN))
@@ -522,28 +524,16 @@ int main(int argc, char **argv)
 
             if (__predict_false(n == 0)) {
                 log_msg("vol_fd hit EOF, exiting");
-                ret = EXIT_FAILURE;
-                goto end;
+                return EXIT_FAILURE;
             }
 
             if (__predict_false(n < 0 && errno != EAGAIN)) {
                 log_msg("read failed, exiting: %m");
-                ret = EXIT_FAILURE;
-                goto end;
+                return EXIT_FAILURE;
             }
         }
     }
 
     log_verbose("exiting");
-end:
-    if (uinput_fd != -1) {
-        ioctl(uinput_fd, UI_DEV_DESTROY);
-        close(uinput_fd);
-    }
-    close(singleton_fd);
-    if (binder_fd != -1)
-        close(binder_fd);
-    if (vol_fd != -1)
-        close(vol_fd);
-    return ret;
+    return EXIT_SUCCESS;
 }
