@@ -26,6 +26,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 
 #include <linux/input.h>
 #include <linux/ioprio.h>
@@ -292,6 +293,8 @@ static void daemonise(const int keep_fd)
     if (__predict_true(dir)) {
         const int dfd = dirfd(dir);
         for (struct dirent *ent; (ent = readdir(dir));) {
+            if (ent->d_name[0] == '.')
+                continue;
             const int fd = atoi(ent->d_name);
             if (fd > STDERR_FILENO && fd != keep_fd && fd != dfd)
                 close(fd);
@@ -299,39 +302,48 @@ static void daemonise(const int keep_fd)
         closedir(dir);
     } else {
         struct rlimit rl;
-        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-            const rlim_t max_fd = (rl.rlim_max == RLIM_INFINITY) ? 1024 : rl.rlim_max;
-            for (rlim_t i = STDERR_FILENO + 1; i < max_fd; ++i) {
-                if (__predict_false((int)i == keep_fd))
-                    continue;
-                close((int)i);
-            }
+        rlim_t max_fd = 1024;
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+            max_fd = rl.rlim_cur;
+        if (max_fd > INT_MAX)
+            max_fd = INT_MAX;
+        for (int fd = STDERR_FILENO + 1; fd < (int)max_fd; ++fd) {
+            if (__predict_false(fd == keep_fd))
+                continue;
+            close(fd);
         }
     }
 
-    for (int i = 1; i < _NSIG; ++i)
-        signal(i, SIG_DFL);
-    sigset_t empty_set;
-    sigemptyset(&empty_set);
-    sigprocmask(SIG_SETMASK, &empty_set, NULL);
+    for (int i = 1; i < NSIG; ++i) {
+        /*struct sigaction sa;
+        if (sigaction(i, NULL, &sa) == 0 && sa.sa_handler == SIG_IGN)*/
+            signal(i, SIG_DFL);
+    }
+    signal(SIGHUP, SIG_IGN);
+    signal(SIGPIPE, SIG_IGN);
 
     pid_t pid = fork();
     if (pid < 0) { __log_msg("fork: %m"); exit(EXIT_FAILURE); }
-    if (pid > 0) _exit(EXIT_SUCCESS);
+    if (pid > 0) {
+        int st;
+        while (waitpid(pid, &st, 0) < 0) {
+            if (errno != EINTR)
+                _exit(EXIT_FAILURE);
+        }
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : EXIT_FAILURE);
+    }
 
-    if (setsid() < 0) { __log_msg("setsid: %m"); exit(EXIT_FAILURE); }
-    signal(SIGHUP, SIG_IGN);
-    signal(SIGPIPE, SIG_IGN);
+    if (setsid() < 0) { __log_msg("setsid: %m"); _exit(EXIT_FAILURE); }
 
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
     pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
+    if (pid < 0) _exit(EXIT_FAILURE);
     if (pid > 0) _exit(EXIT_SUCCESS);
 
-    umask(0);
+    umask(077);
 
     const int devnull = open("/dev/null", O_RDWR);
     if (devnull < 0) exit(EXIT_FAILURE);
@@ -341,6 +353,10 @@ static void daemonise(const int keep_fd)
     if (__predict_false(devnull > STDERR_FILENO)) close(devnull);
 
     if (__predict_false(chdir("/") < 0)) exit(EXIT_FAILURE);
+
+    sigset_t empty_set;
+    sigemptyset(&empty_set);
+    sigprocmask(SIG_SETMASK, &empty_set, NULL);
 }
 
 static __always_inline inline int uinput_emit(struct input_event *ev, const int fd, const unsigned short type, const unsigned short code, const int val)
