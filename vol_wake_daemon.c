@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <sched.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -19,19 +18,15 @@
 #include <sys/cdefs.h>
 #include <sys/ioctl.h>
 #include <sys/param.h>
-#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 
 #include <linux/input.h>
-#include <linux/ioprio.h>
 #include <linux/uinput.h>
-#include <linux/sched/types.h>
 
 #include "binder_glue.h"
 #include "is_interactive.h"
@@ -159,113 +154,6 @@ __attribute__((noinline)) static int open_volume_key_device(const char *restrict
 
     closedir(dir);
     return best_fd;
-}
-
-static void parse_cpuset_cpus(char *restrict cpus, cpu_set_t *restrict cpu_set)
-{
-    /* Copyright 2006, The Android Open Source Project
-     * Licensed under the Apache License, Version 2.0 */
-    char *saveptr;
-    char *cpu_range = strtok_r(cpus, ",", &saveptr);
-
-    while (cpu_range) {
-        unsigned int start = 0, end = 0;
-        const int matched = sscanf(cpu_range, "%u-%u", &start, &end);
-
-        if (start >= CPU_SETSIZE) {
-            log_verbose("parse_cpuset_cpus: ignoring CPU number %u >= %d", start, CPU_SETSIZE);
-            goto advance;
-        }
-
-        if (matched == 1) {
-            CPU_SET(start, cpu_set);
-        } else if (matched == 2) {
-            if (end >= CPU_SETSIZE)
-                end = CPU_SETSIZE - 1;
-
-            if (start > end) {
-                const unsigned int tmp = start;
-                start = end;
-                end = tmp;
-            }
-
-            for (unsigned int i = start; i <= end; ++i)
-                CPU_SET(i, cpu_set);
-        } else {
-            log_verbose("parse_cpuset_cpus: failed to match \"%s\"", cpu_range);
-        }
-
-    advance:
-        cpu_range = strtok_r(NULL, ",", &saveptr);
-    }
-}
-
-static void set_background_affinity(cpu_set_t *restrict cpu_set)
-{
-    CPU_ZERO(cpu_set);
-
-    FILE *file = fopen("/dev/cpuset/background/cpus", "re");
-    if (file) {
-        char line[128];
-        if (fgets(line, sizeof(line), file)) {
-            const size_t len = strlen(line);
-            if ((len > 0 && line[len - 1] == '\n') || fgetc(file) == EOF)
-                parse_cpuset_cpus(line, cpu_set);
-            else
-                log_verbose("background cpuset line too long, ignoring");
-        } else {
-            log_verbose("failed to read background cpuset");
-        }
-        fclose(file);
-    }
-
-    if (CPU_COUNT(cpu_set) < 2) {
-        CPU_ZERO(cpu_set);
-        long num_cpus = sysconf(_SC_NPROCESSORS_CONF);
-        if (__predict_false(num_cpus < 1))
-            num_cpus = 1;
-
-        for (long i = 0; i < num_cpus && i < 2; ++i)
-            CPU_SET(i, cpu_set);
-    }
-}
-
-__attribute__((noinline)) static void apply_low_priority(void)
-{
-    cpu_set_t cpu_set;
-    set_background_affinity(&cpu_set);
-
-    if (__predict_false(setpriority(PRIO_PROCESS, 0, 19) < 0))
-        log_verbose("setpriority failed: %m");
-
-    struct sched_param sp = { 0 };
-    if (__predict_false(sched_setscheduler(0, SCHED_IDLE, &sp) < 0)) {
-        log_verbose("sched_setscheduler(SCHED_IDLE) failed, trying SCHED_BATCH: %m");
-        sched_setscheduler(0, SCHED_BATCH, &sp);
-    }
-
-    if (__predict_false(sched_setaffinity(0, sizeof(cpu_set), &cpu_set) < 0))
-        log_verbose("sched_setaffinity failed: %m");
-
-    if (__predict_false(syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_IDLE, 0)) < 0)) {
-        log_verbose("ioprio_set failed, trying best effort: %m");
-        syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 7));
-    }
-
-    if (__predict_false(prctl(PR_SET_TIMERSLACK, 40000000UL, 0, 0, 0) < 0))
-        log_verbose("prctl(PR_SET_TIMERSLACK) failed: %m");
-
-#if 0
-    if (access("/proc/sys/kernel/sched_util_clamp_min", F_OK) == 0) {
-        struct sched_attr attr = { 0 };
-        attr.size = sizeof(attr);
-        attr.sched_flags = SCHED_FLAG_UTIL_CLAMP | SCHED_FLAG_KEEP_ALL;
-        attr.sched_util_min = 0;   // boost = 0
-        attr.sched_util_max = 307; // ~30% of 1024, matches PerfClamp
-        if (__predict_false(syscall(SYS_sched_setattr, 0, &attr, 0) < 0))
-            log_verbose("sched_setattr(uclamp.max) unavailable: %m");
-    }
-#endif
 }
 
 __attribute__((noinline)) static int acquire_singleton_lock(void)
@@ -459,10 +347,8 @@ int main(int argc, char **argv)
     if (singleton_fd < 0)
         return EXIT_FAILURE;
 
-    if (__predict_true(!g_foreground)) {
-        apply_low_priority();
+    if (__predict_true(!g_foreground))
         daemonise(singleton_fd);
-    }
 
     const autoval(fd_t) vol_fd = open_volume_key_device(vol_name);
     if (vol_fd < 0) {
