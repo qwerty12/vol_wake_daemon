@@ -76,7 +76,7 @@ static void on_signal(__unused const int sig)
 
 #define KEYBITS_WORDS howmany(KEY_MAX + 1, __BITS_PER_LONG)
 
-static __attribute_pure__ __always_inline inline int count_bits_set(const unsigned long *bits, const size_t nwords)
+static __attribute_pure__ __always_inline inline int count_bits_set(const unsigned long *restrict bits, const size_t nwords)
 {
     register int count = 0;
     for (size_t i = 0; i < nwords; ++i)
@@ -84,7 +84,7 @@ static __attribute_pure__ __always_inline inline int count_bits_set(const unsign
     return count;
 }
 
-static int open_volume_key_device(const char *vol_name)
+static int open_volume_key_device(const char *restrict vol_name)
 {
     const char *device_path = "/dev/input";
 
@@ -154,7 +154,7 @@ static int open_volume_key_device(const char *vol_name)
     return best_fd;
 }
 
-static void parse_cpuset_cpus(char *cpus, cpu_set_t *cpu_set)
+static void parse_cpuset_cpus(char *restrict cpus, cpu_set_t *restrict cpu_set)
 {
     /* Copyright 2006, The Android Open Source Project
      * Licensed under the Apache License, Version 2.0 */
@@ -193,7 +193,7 @@ static void parse_cpuset_cpus(char *cpus, cpu_set_t *cpu_set)
     }
 }
 
-static void set_background_affinity(cpu_set_t *cpu_set)
+static void set_background_affinity(cpu_set_t *restrict cpu_set)
 {
     CPU_ZERO(cpu_set);
 
@@ -359,7 +359,7 @@ static void daemonise(const int keep_fd)
     sigprocmask(SIG_SETMASK, &empty_set, NULL);
 }
 
-static __always_inline inline int uinput_emit(struct input_event *ev, const int fd, const unsigned short type, const unsigned short code, const int val)
+static __always_inline inline int uinput_emit(struct input_event *restrict ev, const int fd, const unsigned short type, const unsigned short code, const int val)
 {
     ev->type = type;
     ev->code = code;
