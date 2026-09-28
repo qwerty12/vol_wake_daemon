@@ -52,6 +52,13 @@ static int g_foreground = 0;
 static char g_vol_dev[PATH_MAX];
 static volatile sig_atomic_t g_running = 1;
 
+static const struct input_event g_wake_seq[] = {
+    { .type = EV_KEY, .code = KEY_WAKEUP, .value = 1 },
+    { .type = EV_SYN, .code = SYN_REPORT, .value = 0 },
+    { .type = EV_KEY, .code = KEY_WAKEUP, .value = 0 },
+    { .type = EV_SYN, .code = SYN_REPORT, .value = 0 },
+};
+
 #define log_msg(...) do { if (__predict_false(g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 #define log_verbose(...) do { if (__predict_false(g_verbose && g_foreground)) __log_msg(__VA_ARGS__); } while (0)
 
@@ -359,15 +366,6 @@ static void daemonise(const int keep_fd)
     sigprocmask(SIG_SETMASK, &empty_set, NULL);
 }
 
-static __always_inline inline int uinput_emit(struct input_event *restrict ev, const int fd, const unsigned short type, const unsigned short code, const int val)
-{
-    ev->type = type;
-    ev->code = code;
-    ev->value = val;
-    ev->input_event_sec = ev->input_event_usec = 0; // timestamp values are ignored
-    return (int)__predict_true(write(fd, ev, sizeof(struct input_event)) == sizeof(struct input_event));
-}
-
 static int uinput_init(const int allowed_keycode)
 {
     const int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
@@ -411,12 +409,7 @@ static int uinput_init(const int allowed_keycode)
 
 static __always_inline inline void wakeup_screen(const int uinput_fd)
 {
-    static struct input_event ev;
-    if (__predict_true(uinput_emit(&ev, uinput_fd, EV_KEY, KEY_WAKEUP, 1)))
-        (void)uinput_emit(&ev, uinput_fd, EV_SYN, SYN_REPORT, 0);
-
-    (void)uinput_emit(&ev, uinput_fd, EV_KEY, KEY_WAKEUP, 0);
-    (void)uinput_emit(&ev, uinput_fd, EV_SYN, SYN_REPORT, 0);
+    write(uinput_fd, g_wake_seq, sizeof(g_wake_seq));
 }
 
 static __always_inline inline int is_screen_on(void)
