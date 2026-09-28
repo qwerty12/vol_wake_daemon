@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,6 +88,11 @@ static __attribute_pure__ __always_inline inline int count_bits_set(const unsign
     return count;
 }
 
+static __attribute_pure__ __always_inline inline int bitset_get(const unsigned long *bits, const unsigned int i)
+{
+    return (bits[i / __BITS_PER_LONG] >> (i % __BITS_PER_LONG)) & 1UL;
+}
+
 __attribute__((noinline)) static int open_volume_key_device(const char *restrict vol_name)
 {
     const char *device_path = "/dev/input";
@@ -131,9 +137,7 @@ __attribute__((noinline)) static int open_volume_key_device(const char *restrict
         } else {
             unsigned long keybits[KEYBITS_WORDS] = { 0 };
             if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) >= 0) {
-                const int has_volup = (keybits[KEY_VOLUMEUP / __BITS_PER_LONG] >>
-                                        (KEY_VOLUMEUP % __BITS_PER_LONG)) & 1;
-                if (has_volup) {
+                if (bitset_get(keybits, KEY_VOLUMEUP)) {
                     const int n = count_bits_set(keybits, KEYBITS_WORDS);
                     log_verbose("%s supports KEY_VOLUMEUP, %d total keys", g_vol_dev, n);
                     if (best_count < 0 || n < best_count) {
@@ -155,6 +159,24 @@ __attribute__((noinline)) static int open_volume_key_device(const char *restrict
 
     closedir(dir);
     return best_fd;
+}
+
+__attribute__((noinline)) static void mask_volume_events(const int fd)
+{
+    static const unsigned long types = 1UL << EV_KEY;
+    static const unsigned long keys[KEY_VOLUMEUP / __BITS_PER_LONG + 1] = {
+        [KEY_VOLUMEUP / __BITS_PER_LONG] = 1UL << (KEY_VOLUMEUP % __BITS_PER_LONG)
+    };
+
+    struct input_mask m = { .type = EV_SYN, .codes_size = sizeof(types), .codes_ptr = (__u64)(uintptr_t)&types };
+    if (__predict_false(ioctl(fd, EVIOCSMASK, &m) < 0)) {
+        log_verbose("EVIOCSMASK (event types) failed, not filtering: %m");
+        return;
+    }
+
+    m = (struct input_mask){ .type = EV_KEY, .codes_size = sizeof(keys), .codes_ptr = (__u64)(uintptr_t)keys };
+    if (__predict_false(ioctl(fd, EVIOCSMASK, &m) < 0))
+        log_verbose("EVIOCSMASK (key codes) failed, filtering by event type only: %m");
 }
 
 __attribute__((noinline)) static int acquire_singleton_lock(void)
@@ -357,6 +379,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    mask_volume_events(vol_fd);
+
     const autoval(fd_t) binder_fd = SetupBinder();
     if (__predict_false(binder_fd < 0)) {
         if (__predict_true(binder_fd != -1))
@@ -378,6 +402,15 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    sigset_t block_mask, orig_mask, wait_mask;
+    sigemptyset(&block_mask);
+    sigaddset(&block_mask, SIGINT);
+    sigaddset(&block_mask, SIGTERM);
+    sigprocmask(SIG_BLOCK, &block_mask, &orig_mask);
+    wait_mask = orig_mask;
+    sigdelset(&wait_mask, SIGINT);
+    sigdelset(&wait_mask, SIGTERM);
+
     log_verbose("vol=%s pid=%ld", g_vol_dev, (long)getpid());
 
     struct pollfd pfds[2];
@@ -385,11 +418,11 @@ int main(int argc, char **argv)
     pfds[1].fd = binder_fd; pfds[1].events = POLLIN; pfds[1].revents = 0;
 
     while (g_running) {
-        const int nready = poll(pfds, 2, -1);
+        const int nready = ppoll(pfds, 2, NULL, &wait_mask);
 
         if (__predict_false(nready < 0)) {
             if (errno == EINTR) continue;
-            log_msg("poll failed, exiting: %m");
+            log_msg("ppoll failed, exiting: %m");
             return EXIT_FAILURE;
         }
 
