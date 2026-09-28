@@ -11,7 +11,7 @@
 #define BINDER_NDK_COMPAT_CHECK(name)   !p_##name ||
 #define BINDER_NDK_COMPAT_CHECK_END     0
 
-extern __printflike(1, 2) void __log_msg(const char *fmt, ...);
+extern __printflike(1, 2) void __log_msg(const char *restrict fmt, ...);
 
 __attribute__((constructor)) static void binder_ndk_compat_init(void)
 {

@@ -9,6 +9,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -62,7 +63,7 @@ static
 #else
 __LIBC_HIDDEN__
 #endif
-__attribute__((noinline, cold)) __printflike(1, 2) void __log_msg(const char *fmt, ...)
+__attribute__((noinline, cold)) __printflike(1, 2) void __log_msg(const char *restrict fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -158,9 +159,11 @@ __attribute__((noinline)) static int open_volume_key_device(const char *restrict
 
 __attribute__((noinline)) static int acquire_singleton_lock(void)
 {
-    const size_t name_len = sizeof(SINGLETON_NAME) - 1;
+    static const struct sockaddr_un addr = { .sun_family = AF_UNIX, .sun_path = "\0" SINGLETON_NAME };
 
-    _Static_assert(name_len <= sizeof(((struct sockaddr_un *)0)->sun_path) - 1, "singleton lock name too long");
+    _Static_assert(sizeof("\0" SINGLETON_NAME) - 1 <= sizeof(addr.sun_path), "singleton lock name too long");
+
+    const socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + sizeof("\0" SINGLETON_NAME) - 1;
 
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (__predict_false(fd < 0)) {
@@ -168,12 +171,7 @@ __attribute__((noinline)) static int acquire_singleton_lock(void)
         return -1;
     }
 
-    struct sockaddr_un addr = { 0 };
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path + 1, SINGLETON_NAME, name_len);
-    const socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
-
-    if (bind(fd, (struct sockaddr *)&addr, addr_len) < 0) {
+    if (bind(fd, (const struct sockaddr *)&addr, addr_len) < 0) {
         __log_msg(errno == EADDRINUSE ? "another instance is already running" : "bind() for singleton lock failed: %m");
         close(fd);
         return -1;
