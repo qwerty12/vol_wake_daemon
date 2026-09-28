@@ -402,25 +402,26 @@ int main(int argc, char **argv)
             OnBinderReadReady();
 
         if (__predict_true(pfds[0].revents & POLLIN)) {
-            struct input_event ev;
-            ssize_t n;
-            while (__predict_true((n = read(vol_fd, &ev, sizeof(ev))) == (ssize_t)sizeof(ev))) {
-                if (ev.type == EV_KEY && ev.code == KEY_VOLUMEUP && ev.value == 1) {
-                    if (is_screen_on()) {
-                        log_verbose("volume-up down: screen already on, skipping wake");
-                    } else {
-                        wakeup_screen(uinput_fd);
-                        log_msg("volume-up down: waking screen");
+            struct input_event ev[4];
+            const ssize_t n = read(vol_fd, ev, sizeof(ev));
+
+            if (__predict_true(n > 0)) {
+                const size_t count = (size_t)n / sizeof(ev[0]);
+                for (size_t i = 0; i < count; ++i) {
+                    if (ev[i].type == EV_KEY && ev[i].code == KEY_VOLUMEUP && ev[i].value == 1) {
+                        if (!is_screen_on()) {
+                            wakeup_screen(uinput_fd);
+                            log_msg("volume-up down: waking screen");
+                        } else {
+                            log_verbose("volume-up down: screen already on, skipping wake");
+                        }
+                        break;
                     }
                 }
-            }
-
-            if (__predict_false(n == 0)) {
+            } else if (__predict_false(n == 0)) {
                 log_msg("vol_fd hit EOF, exiting");
                 return EXIT_FAILURE;
-            }
-
-            if (__predict_false(n < 0 && errno != EAGAIN)) {
+            } else if (__predict_false(errno != EAGAIN)) {
                 log_msg("read failed, exiting: %m");
                 return EXIT_FAILURE;
             }
