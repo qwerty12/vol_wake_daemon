@@ -67,7 +67,7 @@ static
 #else
 __LIBC_HIDDEN__
 #endif
-__attribute__((noinline)) __printflike(1, 2) void __log_msg(const char *fmt, ...)
+__attribute__((noinline, cold)) __printflike(1, 2) void __log_msg(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -91,7 +91,7 @@ static __attribute_pure__ __always_inline inline int count_bits_set(const unsign
     return count;
 }
 
-static int open_volume_key_device(const char *restrict vol_name)
+__attribute__((noinline)) static int open_volume_key_device(const char *restrict vol_name)
 {
     const char *device_path = "/dev/input";
 
@@ -230,7 +230,7 @@ static void set_background_affinity(cpu_set_t *restrict cpu_set)
     }
 }
 
-static void apply_low_priority(void)
+__attribute__((noinline)) static void apply_low_priority(void)
 {
     cpu_set_t cpu_set;
     set_background_affinity(&cpu_set);
@@ -268,7 +268,7 @@ static void apply_low_priority(void)
 #endif
 }
 
-static int acquire_singleton_lock(void)
+__attribute__((noinline)) static int acquire_singleton_lock(void)
 {
     const size_t name_len = sizeof(SINGLETON_NAME) - 1;
 
@@ -294,7 +294,7 @@ static int acquire_singleton_lock(void)
     return fd;
 }
 
-static void daemonise(const int keep_fd)
+__attribute__((noinline)) static void daemonise(const int keep_fd)
 {
     DIR *dir = opendir("/proc/self/fd");
     if (__predict_true(dir)) {
@@ -366,7 +366,7 @@ static void daemonise(const int keep_fd)
     sigprocmask(SIG_SETMASK, &empty_set, NULL);
 }
 
-static int uinput_init(const int allowed_keycode)
+__attribute__((noinline)) static int uinput_init(const int allowed_keycode)
 {
     const int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (__predict_false(fd < 0)) {
@@ -422,7 +422,7 @@ static __always_inline inline int is_screen_on(void)
     return 0;
 }
 
-static __noreturn __attribute__((noinline)) __attribute__((cold))
+static __noreturn __attribute__((noinline, cold))
 void usage(const char *argv0, const int status)
 {
     const char *name = __predict_true(argv0) ? basename(argv0) : "";
